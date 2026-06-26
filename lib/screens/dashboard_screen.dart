@@ -129,13 +129,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           ),
                         ],
                       ),
-                      const CircleAvatar(
+                      CircleAvatar(
                         radius: 24,
-                        backgroundColor: AppTheme.primaryColor,
-                        child: Icon(Icons.fitness_center, color: Colors.black),
+                        backgroundColor: Colors.transparent,
+                        child: ClipOval(
+                          child: Image.asset(
+                            'assets/icons/app_icon.png',
+                            width: 48,
+                            height: 48,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
                       ),
-                    ],
-                  ),
+                    ],   // ← closes children: [ of the Row
+                  ),   
                   const SizedBox(height: 24),
                   // First row: Steps and Calories
                   Row(
