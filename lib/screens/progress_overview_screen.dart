@@ -9,6 +9,7 @@ import '../providers/progress_provider.dart';
 import '../providers/stats_provider.dart';
 import '../themes/app_theme.dart';
 import '../widgets/fitness_widgets.dart';
+import '../providers/step_provider.dart';
 
 class ProgressOverviewScreen extends StatefulWidget {
   const ProgressOverviewScreen({super.key});
@@ -28,9 +29,14 @@ class _ProgressOverviewScreenState extends State<ProgressOverviewScreen> {
     });
   }
   
-
 Future<void> _loadProgressData() async {
   if (!mounted) return;
+
+  // ← Force sync current steps to Firebase BEFORE loading progress
+  final stepProvider = context.read<StepProvider>();
+  if (stepProvider.isInitialized) {
+    await stepProvider.syncStepsToFirebase();
+  }
 
   final profileProvider = context.read<ProfileProvider>();
   if (profileProvider.userProfile != null) {
@@ -39,11 +45,17 @@ Future<void> _loadProgressData() async {
     );
   }
 
-  // These run in parallel for speed
   await Future.wait([
     context.read<GoalProvider>().fetchGoals(),
     context.read<StatsProvider>().fetchRecentStats(days: 30),
   ]);
+
+if (mounted) {
+    final currentSteps = context.read<StepProvider>().todaySteps;
+    if (currentSteps > 0) {
+      await context.read<GoalProvider>().updateStepGoalProgress(currentSteps);
+    }
+  }
 }
 
   @override
@@ -397,81 +409,142 @@ Future<void> _loadProgressData() async {
     )).toList();
   }
 
-  List<Widget> _buildGoalsProgressCards(
-    BuildContext context,
-    List<Goal> goals,
-    dynamic weeklySummary,
-  ) {
-    final cards = <Widget>[];
-    for (final goal in goals.take(3)) {
-      double progress = 0;
-      var progressText = '';
+List<Widget> _buildGoalsProgressCards(
+  BuildContext context,
+  List<Goal> goals,
+  dynamic weeklySummary,
+) {
+  final cards = <Widget>[];
+  for (final goal in goals.take(3)) {
+    double progress = 0;
+    var progressText = '';
+    double current = 0;
+    double target = goal.targetValue > 0 ? goal.targetValue : 1;
 
-      if (goal.goalType == 'steps') {
-        final current = weeklySummary?.averageSteps ?? 0;
-        final target = goal.targetValue > 0 ? goal.targetValue : 10000;
-        progress = (current / target).clamp(0.0, 1.0);
-        progressText = 'Steps: $current/${target.toInt()}';
-      } else if (goal.goalType == 'workout' || goal.goalType == 'workouts') {
-        final current = weeklySummary?.totalWorkouts ?? 0;
-        final target = goal.targetValue > 0 ? goal.targetValue : 4;
-        progress = (current / target).clamp(0.0, 1.0);
-        progressText = 'Workouts: $current/${target.toInt()}';
-      } else if (goal.goalType == 'weight') {
-        final current = weeklySummary?.currentWeight ?? 0.0;
-        final target = goal.targetValue;
-        final ratio = target == 0 ? 0.0 : (target - current).abs() / target;
-        progress = (1.0 - ratio.clamp(0.0, 1.0)).clamp(0.0, 1.0);
-        progressText = 'Weight: ${current.toStringAsFixed(1)}kg / ${target.toStringAsFixed(1)}kg';
-      } else if (goal.goalType == 'calories') {
-        final current = weeklySummary?.totalCalories ?? 0.0;
-        final target = goal.targetValue > 0 ? goal.targetValue : 2000;
-        progress = (current / target).clamp(0.0, 1.0);
-        progressText = 'Calories: ${current.toStringAsFixed(0)}/${target.toInt()}';
-      }
+    if (goal.goalType == 'steps') {
+      // Use goal.currentValue (updated by GoalProvider) as primary source
+      // Fall back to live weeklySummary average if currentValue is 0
+      final liveSteps = (weeklySummary?.averageSteps ?? 0).toDouble();
+      current = goal.currentValue > 0 ? goal.currentValue : liveSteps;
+      progress = (current / target).clamp(0.0, 1.0);
+      progressText = 'Steps: ${current.toInt()}/${target.toInt()}';
 
-      cards.add(
-        SectionCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                goal.goalType.toUpperCase(),
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: AppTheme.textSecondaryColor,
-                  letterSpacing: 0.4,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                _getGoalDisplayName(goal),
-  style: Theme.of(context).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 8),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: LinearProgressIndicator(
-                  value: progress,
-                  minHeight: 8,
-                  backgroundColor: Colors.white12,
-                  valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.accentColor),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '${(progress * 100).toStringAsFixed(0)}% • $progressText',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: AppTheme.textSecondaryColor,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-      cards.add(const SizedBox(height: 12));
+    } else if (goal.goalType == 'workout' || goal.goalType == 'workouts') {
+      final liveWorkouts = (weeklySummary?.totalWorkouts ?? 0).toDouble();
+      current = goal.currentValue > 0 ? goal.currentValue : liveWorkouts;
+      progress = (current / target).clamp(0.0, 1.0);
+      progressText = 'Workouts: ${current.toInt()}/${target.toInt()}';
+
+    } else if (goal.goalType == 'weight') {
+      final liveWeight = weeklySummary?.currentWeight ?? 0.0;
+      current = goal.currentValue > 0 ? goal.currentValue : liveWeight;
+      // For weight goals, progress = how close current is to target
+      final startWeight = current; // current weight
+      final ratio = target == 0 ? 0.0 : (startWeight - target).abs() / startWeight;
+      progress = (ratio).clamp(0.0, 1.0);
+      progressText = 'Weight: ${current.toStringAsFixed(1)}kg → ${target.toStringAsFixed(1)}kg';
+
+    } else if (goal.goalType == 'calories') {
+      final liveCalories = weeklySummary?.totalCalories ?? 0.0;
+      current = goal.currentValue > 0 ? goal.currentValue : liveCalories;
+      progress = (current / target).clamp(0.0, 1.0);
+      progressText = 'Calories: ${current.toStringAsFixed(0)}/${target.toInt()}';
     }
-    return cards;
+
+    // Color based on progress
+    final progressColor = progress >= 1.0
+        ? Colors.green
+        : progress >= 0.5
+            ? AppTheme.accentColor
+            : AppTheme.primaryColor;
+
+    cards.add(
+      SectionCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Goal type badge + deadline
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  goal.goalType.toUpperCase(),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppTheme.textSecondaryColor,
+                    letterSpacing: 0.4,
+                  ),
+                ),
+                Text(
+                  _getDeadlineText(goal.targetDate),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppTheme.textSecondaryColor,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+
+            // Goal name
+            Text(
+              _getGoalDisplayName(goal),
+              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 10),
+
+            // Progress bar
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: LinearProgressIndicator(
+                value: progress,
+                minHeight: 8,
+                backgroundColor: Colors.white12,
+                valueColor: AlwaysStoppedAnimation<Color>(progressColor),
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // Progress text + percentage
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  progressText,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppTheme.textSecondaryColor,
+                  ),
+                ),
+                Text(
+                  '${(progress * 100).toStringAsFixed(0)}%',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: progressColor,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    cards.add(const SizedBox(height: 12));
   }
+  return cards;
+}
+
+// ← ADD this helper method
+String _getDeadlineText(DateTime targetDate) {
+  final now = DateTime.now();
+  final diff = targetDate.difference(now).inDays;
+  if (diff < 0) return 'Overdue';
+  if (diff == 0) return 'Due today';
+  if (diff == 1) return '1 day left';
+  if (diff < 7) return '$diff days left';
+  if (diff < 30) return '${(diff / 7).floor()} weeks left';
+  return '${(diff / 30).floor()} months left';
+}
 
   Color _getBMIColor(String category) {
     switch (category) {

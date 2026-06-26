@@ -17,12 +17,10 @@ class GoalProvider extends ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get error => _error;
 
-  /// Initialize by setting up real-time listener
   Future<void> initialize() async {
     _setupRealtimeListener();
   }
 
-  /// Setup real-time listener for goals
   void _setupRealtimeListener() {
     if (_auth.currentUser == null) {
       _error = 'User not authenticated';
@@ -50,7 +48,6 @@ class GoalProvider extends ChangeNotifier {
     }
   }
 
-  /// Fetch all goals (one-time fetch)
   Future<void> fetchGoals() async {
     _isLoading = true;
     _error = null;
@@ -66,7 +63,6 @@ class GoalProvider extends ChangeNotifier {
     }
   }
 
-  /// Get goals by category
   Future<List<Goal>> getGoalsByCategory(String category) async {
     try {
       return await _goalService.getGoalsByCategory(category);
@@ -76,7 +72,6 @@ class GoalProvider extends ChangeNotifier {
     }
   }
 
-  /// Get active goals
   Future<List<Goal>> getActiveGoals() async {
     try {
       return await _goalService.getActiveGoals();
@@ -86,7 +81,6 @@ class GoalProvider extends ChangeNotifier {
     }
   }
 
-  /// Add new goal
   Future<bool> addGoal(Goal goal) async {
     try {
       await _goalService.addGoal(goal);
@@ -98,7 +92,6 @@ class GoalProvider extends ChangeNotifier {
     }
   }
 
-  /// Update goal
   Future<bool> updateGoal(Goal goal) async {
     try {
       await _goalService.updateGoal(goal);
@@ -116,23 +109,35 @@ class GoalProvider extends ChangeNotifier {
   }
 
   /// Update goal progress
-  Future<bool> updateGoalProgress(String goalId, double newValue) async {
+  Future<bool> updateGoalProgress(String goalId, double progress) async {
     try {
-      await _goalService.updateGoalProgress(goalId, newValue);
+      await _goalService.updateGoalProgress(goalId, progress);
       final index = _goals.indexWhere((g) => g.id == goalId);
       if (index != -1) {
-        _goals[index] = _goals[index].copyWith(currentValue: newValue);
+        _goals[index] = _goals[index].copyWith(currentValue: progress);
         notifyListeners();
       }
       return true;
     } catch (e) {
-      _error = 'Failed to update progress: ${e.toString()}';
+      _error = 'Failed to update goal progress: ${e.toString()}';
       notifyListeners();
       return false;
     }
   }
 
-  /// Delete goal
+  /// Update step goal progress from live step data
+  Future<void> updateStepGoalProgress(int currentSteps) async {
+    try {
+      for (final goal in _goals) {
+        if (goal.goalType == 'steps' && !goal.isCompleted) {
+          await updateGoalProgress(goal.id, currentSteps.toDouble());
+        }
+      }
+    } catch (e) {
+      print('Error updating step goal progress: $e');
+    }
+  }
+
   Future<bool> deleteGoal(String goalId) async {
     try {
       await _goalService.deleteGoal(goalId);
@@ -146,7 +151,6 @@ class GoalProvider extends ChangeNotifier {
     }
   }
 
-  /// Get completed goals count
   Future<int> getCompletedGoalsCount() async {
     try {
       return await _goalService.getCompletedGoalsCount();
@@ -155,7 +159,6 @@ class GoalProvider extends ChangeNotifier {
     }
   }
 
-  /// Clear goals (used on logout)
   void clearGoals() {
     _goals = [];
     _error = null;

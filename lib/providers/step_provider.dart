@@ -7,7 +7,7 @@ import '../services/step_service.dart';
 
 /// Provider for managing step tracking state
 /// Integrates StepService (pedometer) and FirebaseStepService (Firestore)
-class StepProvider extends ChangeNotifier {
+class StepProvider extends ChangeNotifier with WidgetsBindingObserver {
   final StepService _stepService = StepService();
   final FirebaseStepService _firebaseStepService = FirebaseStepService();
 
@@ -18,6 +18,7 @@ class StepProvider extends ChangeNotifier {
   String? _error;
   bool _permissionGranted = false;
   bool _isInitialized = false;
+  String _lastSyncedDate = '';
   
   Timer? _syncTimer;
   static const Duration _syncInterval = Duration(seconds: 30);
@@ -36,10 +37,11 @@ class StepProvider extends ChangeNotifier {
   /// - Start step tracking
   /// - Load today's data from Firestore
   Future<void> initialize() async {
-    if (_isInitialized) {
-      debugPrint('🔄 [StepProvider] Already initialized');
-      return;
-    }
+    if (_isInitialized) return;
+
+    _isLoading = true;
+    _error = null;
+    notifyListeners();
 
     _isLoading = true;
     _error = null;
@@ -48,14 +50,15 @@ class StepProvider extends ChangeNotifier {
     try {
       debugPrint('🚀 [StepProvider] Initializing...');
 
-      // Initialize step service
+      // ← ADD: Register lifecycle observer
+      WidgetsBinding.instance.addObserver(this);
+
       _permissionGranted = await _stepService.initialize();
       if (!_permissionGranted) {
         _error = 'Step tracking permission is required to count your steps.';
         _isLoading = false;
         _isInitialized = false;
         notifyListeners();
-        debugPrint('❌ [StepProvider] $error');
         return;
       }
 
@@ -68,6 +71,8 @@ class StepProvider extends ChangeNotifier {
       // Start periodic sync
       _startPeriodicSync();
 
+       _lastSyncedDate = _getTodayDateString();
+
       _isInitialized = true;
       debugPrint('✅ [StepProvider] Initialized successfully');
     } catch (e) {
@@ -79,11 +84,60 @@ class StepProvider extends ChangeNotifier {
     }
   }
 
-  /// Load today's steps from Firestore
-  Future<void> _loadTodayStepsFromFirebase() async {
-    try {
-      debugPrint('📥 [StepProvider] Loading today\'s steps from Firestore...');
+  String _getTodayDateString() {
+    final now = DateTime.now();
+    return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+  }
 
+  // ← ADD: App lifecycle handler — saves steps when app goes to background
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      debugPrint('📱 [StepProvider] App going to background — saving steps...');
+      syncStepsToFirebase();
+    }
+
+    if (state == AppLifecycleState.resumed) {
+      debugPrint('📱 [StepProvider] App resumed — checking for day rollover...');
+      _checkDayRollover();
+    }
+  }
+
+  Future<void> _checkDayRollover() async {
+    final today = _getTodayDateString();
+    if (_lastSyncedDate.isNotEmpty && _lastSyncedDate != today) {
+      debugPrint('🌅 [StepProvider] New day detected! Resetting steps for $today');
+      // Save yesterday's final count first
+      await _saveEndOfDaySteps(_lastSyncedDate);
+      // Reset for new day
+      _todaySteps = 0;
+      _caloriesBurned = 0;
+      _lastSyncedDate = today;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _saveEndOfDaySteps(String date) async {
+    try {
+      final data = DailyStepData(
+        date: date,
+        steps: _todaySteps,
+        stepGoal: _stepGoal,
+        caloriesBurned: _caloriesBurned,
+        updatedAt: DateTime.now(),
+      );
+      await _firebaseStepService.saveDailySteps(data);
+      debugPrint('🌙 [StepProvider] End-of-day saved for $date: $_todaySteps steps');
+    } catch (e) {
+      debugPrint('❌ [StepProvider] Failed to save end-of-day steps: $e');
+    }
+  }
+
+
+  /// Load today's steps from Firestore
+   Future<void> _loadTodayStepsFromFirebase() async {
+    try {
       final data = await _firebaseStepService.getTodaySteps();
       if (data != null) {
         _todaySteps = data.steps;
@@ -91,7 +145,6 @@ class StepProvider extends ChangeNotifier {
         _stepGoal = data.stepGoal;
         debugPrint('✅ [StepProvider] Loaded from Firestore: $_todaySteps steps');
       } else {
-        debugPrint('ℹ️ [StepProvider] No Firestore data for today, starting fresh');
         _todaySteps = _stepService.getTodaySteps();
         _updateCalories();
       }
@@ -100,13 +153,14 @@ class StepProvider extends ChangeNotifier {
     }
   }
 
+
   /// Start periodic sync of step data to Firestore
   void _startPeriodicSync() {
     _syncTimer?.cancel();
     _syncTimer = Timer.periodic(_syncInterval, (_) async {
+      await _checkDayRollover();
       await syncStepsToFirebase();
     });
-    debugPrint('🔄 [StepProvider] Periodic sync started (every ${_syncInterval.inSeconds}s)');
   }
 
   /// Sync current step data to Firestore
@@ -115,7 +169,6 @@ class StepProvider extends ChangeNotifier {
       _todaySteps = _stepService.getTodaySteps();
       _updateCalories();
 
-      final hasToday = await _firebaseStepService.hasTodaySteps();
       final success = await _firebaseStepService.updateTodaySteps(
         _todaySteps,
         _caloriesBurned,
@@ -123,13 +176,8 @@ class StepProvider extends ChangeNotifier {
       );
 
       if (success) {
-        if (hasToday) {
-          debugPrint('🔄 [StepProvider] Updated Firestore: $_todaySteps steps');
-        } else {
-          debugPrint('✨ [StepProvider] Created new Firestore record: $_todaySteps steps');
-        }
-      } else {
-        debugPrint('⚠️ [StepProvider] Failed to sync to Firestore');
+        _lastSyncedDate = _getTodayDateString();
+        debugPrint('🔄 [StepProvider] Synced to Firestore: $_todaySteps steps');
       }
 
       notifyListeners();
@@ -151,27 +199,17 @@ class StepProvider extends ChangeNotifier {
     _stepGoal = goal;
     await syncStepsToFirebase();
     notifyListeners();
-    debugPrint('🎯 [StepProvider] Step goal set to: $_stepGoal');
   }
 
   /// Refresh step data from both sensor and Firestore
   Future<void> refreshSteps() async {
     try {
-      debugPrint('🔄 [StepProvider] Refreshing steps...');
-      
-      // Get latest from sensor
       _todaySteps = _stepService.getTodaySteps();
       _updateCalories();
-      
-      // Sync to Firestore
       await syncStepsToFirebase();
-      
-      debugPrint('✅ [StepProvider] Refresh complete: $_todaySteps steps');
     } catch (e) {
       _error = 'Failed to refresh steps: $e';
-      debugPrint('❌ [StepProvider] $error');
     }
-    
     notifyListeners();
   }
 
@@ -190,7 +228,6 @@ class StepProvider extends ChangeNotifier {
     try {
       return await _firebaseStepService.getRecentSteps(days: days);
     } catch (e) {
-      debugPrint('❌ [StepProvider] Error getting recent steps: $e');
       return [];
     }
   }
@@ -200,7 +237,6 @@ class StepProvider extends ChangeNotifier {
     try {
       return await _firebaseStepService.getAverageSteps(days: days);
     } catch (e) {
-      debugPrint('❌ [StepProvider] Error getting average steps: $e');
       return 0.0;
     }
   }
@@ -210,7 +246,6 @@ class StepProvider extends ChangeNotifier {
     try {
       return await _firebaseStepService.getTotalCalories(days: days);
     } catch (e) {
-      debugPrint('❌ [StepProvider] Error getting total calories: $e');
       return 0.0;
     }
   }
@@ -229,8 +264,10 @@ class StepProvider extends ChangeNotifier {
     _isLoading = false;
     _permissionGranted = false;
     _isInitialized = false;
+    _lastSyncedDate = '';
     _syncTimer?.cancel();
-    print('🗑️  StepProvider: Step data cleared');
+    // ← ADD: Remove lifecycle observer on clear
+    WidgetsBinding.instance.removeObserver(this);
     notifyListeners();
   }
 
@@ -238,6 +275,7 @@ class StepProvider extends ChangeNotifier {
   @override
   Future<void> dispose() async {
     _syncTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this); // ← ADD
     await _stepService.dispose();
     super.dispose();
   }
